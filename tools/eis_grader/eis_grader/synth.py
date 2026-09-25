@@ -25,3 +25,25 @@ def spectrum(params, noise=0.003, fmin=0.05, fmax=10e3, per_decade=10, seed=0, n
     rng = np.random.default_rng(seed)
     z = z + noise * np.abs(z) * (rng.standard_normal(len(z)) + 1j * rng.standard_normal(len(z)))
     return Spectrum(freq, z, name=name)
+
+
+def population(n=40, seed=0):
+    """Labelled cells for testing the ML path.
+
+    SOH mainly drives charge-transfer growth and arc depression, while R0 also
+    carries aging-unrelated spread (contacts, manufacturing), so total resistance
+    alone is an imperfect SOH proxy.
+    """
+    rng = np.random.default_rng(seed)
+    cells = []
+    for i in range(n):
+        soh = rng.uniform(70, 100)
+        fade = (100 - soh) / 30  # 0 = new, 1 = 70% SOH
+        p = dict(FRESH)
+        p["R0"] *= (1 + 0.3 * fade) * rng.lognormal(0, 0.15)
+        p["R1"] *= (1 + 0.8 * fade) * rng.lognormal(0, 0.08)
+        p["R2"] *= (1 + 1.5 * fade ** 1.5) * rng.lognormal(0, 0.08)
+        p["a2"] = FRESH["a2"] - 0.1 * fade + rng.normal(0, 0.01)
+        p["Aw"] *= (1 + 1.0 * fade) * rng.lognormal(0, 0.1)
+        cells.append((spectrum(p, seed=seed * 1000 + i, name=f"cell{i:02d}"), soh))
+    return cells

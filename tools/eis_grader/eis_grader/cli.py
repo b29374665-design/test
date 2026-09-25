@@ -6,7 +6,7 @@ import sys
 
 import numpy as np
 
-from . import grade, io, kk, model
+from . import grade, io, kk, ml, model
 
 KK_LIMIT = 0.02   # max Lin-KK residual (relative to |Z|) for trustworthy data
 FIT_LIMIT = 0.02  # max RMS fit error
@@ -22,7 +22,7 @@ def analyse(spec, n_mc, seed):
         "R1": samples[:, 2],
         "R2": samples[:, 5],
     }
-    return {"spec": spec, "kk": check, "fit": res, "mc": mc, "sigma": sigma}
+    return {"spec": spec, "kk": check, "fit": res, "mc": mc, "mc_params": samples, "sigma": sigma}
 
 
 def _ci(a):
@@ -84,6 +84,7 @@ def main(argv=None):
     ap.add_argument("--ref", help="全新（基準）電池的 EIS 檔")
     ap.add_argument("--r0-new", type=float, help="全新電池 R0（Ω），例如規格書內阻")
     ap.add_argument("--rp-new", type=float, help="全新電池 Rp（Ω）")
+    ap.add_argument("--model", help="用 eis_grader.train 訓練好的隨機森林模型（.joblib）")
     ap.add_argument("--mc", type=int, default=200, help="蒙地卡羅次數（預設 200）")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--out", default="eis_report", help="輸出資料夾（圖與 JSON）")
@@ -107,6 +108,11 @@ def main(argv=None):
         baseline = {m: float(np.median([r["fit"].value(m) for r in results])) for m in grade.METRICS}
         mode = "本批電池中位數（相對排序，非絕對健康度）"
 
+    bundle = None
+    if args.model:
+        import joblib
+        bundle = joblib.load(args.model)
+
     report = []
     for a in results:
         res = a["fit"]
@@ -128,8 +134,20 @@ def main(argv=None):
             print(f"  內阻成長  R0 ×{verdict['metrics']['R0']['ratio']:.2f}   Rp ×{verdict['metrics']['Rp']['ratio']:.2f}"
                   f"   SOH_R ≈ {verdict['soh_r']:.0f}%")
             print(f"  蒙地卡羅等級機率  {probs}")
-        else:
+        elif not bundle:
             print("判定：未提供基準（--ref 或 --r0-new/--rp-new，或一次給 3 顆以上電池），只輸出參數")
+        rf_pred = None
+        if bundle:
+            spec = a["spec"]
+            rf_pred = ml.predict_mc(bundle, a["mc_params"], (spec.freq.min(), spec.freq.max()))
+            if bundle["task"] == "regression":
+                lo, hi = rf_pred["soh_95"]
+                print(f"隨機森林：SOH ≈ {rf_pred['soh']:.1f}   量測雜訊 95% 區間 [{lo:.1f}, {hi:.1f}]"
+                      f"   模型誤差（交叉驗證 MAE）±{rf_pred['cv_mae']:.1f}")
+            else:
+                probs = "  ".join(f"{c}:{p:.0%}" for c, p in rf_pred["probabilities"].items())
+                print(f"隨機森林：{rf_pred['label']}  可信度 {rf_pred['confidence']:.0%}   ({probs})"
+                      f"   交叉驗證平衡準確率 {rf_pred['cv_balanced_accuracy']:.0%}")
         for n in notes:
             print(f"  ⚠ {n}")
         print(f"  圖：{png}")
@@ -141,6 +159,7 @@ def main(argv=None):
             "monte_carlo": {k: dict(zip(("p2.5", "median", "p97.5"), _ci(v))) for k, v in a["mc"].items()},
             "mc_noise": a["sigma"],
             "verdict": verdict,
+            "random_forest": rf_pred,
             "warnings": notes,
             "plot": png,
         })

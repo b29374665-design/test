@@ -3,7 +3,7 @@ import json
 import numpy as np
 import pytest
 
-from eis_grader import cli, grade, io, kk, model, synth
+from eis_grader import cli, grade, io, kk, ml, model, synth
 
 
 def _write(path, header, spec, neg_imag=True, scale=1.0, sep=","):
@@ -86,3 +86,45 @@ def test_cli_batch_mode(tmp_path):
     grades = [c["verdict"]["grade"] for c in rep["cells"]]
     assert grades[:3] == ["A", "A", "A"] and grades[3] == "D"
     assert (out / "cell3.png").exists()
+
+
+def _population_files(tmp_path, n=40, seed=1, labeller=None):
+    labels = tmp_path / "labels.csv"
+    with open(labels, "w") as fh:
+        fh.write("file,soh\n" if labeller is None else "file,label\n")
+        for spec, soh in synth.population(n, seed=seed):
+            io.save(tmp_path / f"{spec.name}.csv", spec)
+            fh.write(f"{spec.name}.csv,{soh if labeller is None else labeller(soh)}\n")
+    return labels
+
+
+def test_random_forest_regression_beats_single_feature(tmp_path):
+    files, y, task = ml.load_labels(_population_files(tmp_path))
+    assert task == "regression"
+    bundle = ml.train(files, y, task, repeats=2, log=lambda *_: None)
+    cv = bundle["cv"]
+    assert cv["random_forest"]["MAE"][0] < cv["total_resistance_only"]["MAE"][0]
+    assert cv["random_forest"]["MAE"][0] < 3.0
+
+    spec, soh = synth.population(1, seed=99)[0]
+    res = model.fit(spec)
+    samples, _ = model.monte_carlo(res, n=20)
+    pred = ml.predict_mc(bundle, samples, (spec.freq.min(), spec.freq.max()))
+    assert abs(pred["soh"] - soh) < 3 * cv["random_forest"]["MAE"][0]
+
+
+def test_random_forest_classification_and_cli(tmp_path):
+    import joblib
+
+    labels = _population_files(tmp_path, n=30, labeller=lambda s: "good" if s >= 85 else "bad")
+    model_path = tmp_path / "m.joblib"
+    from eis_grader import train
+    assert train.main([str(labels), "--out", str(model_path), "--repeats", "2"]) == 0
+    assert joblib.load(model_path)["task"] == "classification"
+
+    new = tmp_path / "new.csv"
+    io.save(new, synth.spectrum(synth.aged(1.0, 2.5), seed=7))
+    out = tmp_path / "out"
+    assert cli.main([str(new), "--model", str(model_path), "--mc", "20", "--out", str(out)]) == 0
+    rf = json.loads((out / "report.json").read_text())["cells"][0]["random_forest"]
+    assert rf["label"] == "bad"
