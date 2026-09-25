@@ -67,3 +67,8 @@ Desktop.ini
 
 *.log
 npm-debug.log*
+
+# EIS grader
+__pycache__/
+.pytest_cache/
+eis_report/
